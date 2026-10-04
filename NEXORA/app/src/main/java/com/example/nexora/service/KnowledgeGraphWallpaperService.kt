@@ -144,13 +144,11 @@ class KnowledgeGraphWallpaperService : WallpaperService() {
             if (visible) {
                 // Groups and options may have been changed in the launcher meanwhile.
                 renderer.showAppNames = settings.showAppNames
-                val latest = groupRepository.load()
-                val latestCenter = settings.centerPackage
-                if (latest != groups || latestCenter != centerPackage) {
-                    groups = latest
-                    centerPackage = latestCenter
-                    rebuildScene()
-                }
+                // Built anew every time the home screen shows: the group names land
+                // in new places each time.
+                groups = groupRepository.load()
+                centerPackage = settings.centerPackage
+                rebuildScene()
                 lastTime = System.currentTimeMillis()
                 handler.post(drawRunnable)
             }

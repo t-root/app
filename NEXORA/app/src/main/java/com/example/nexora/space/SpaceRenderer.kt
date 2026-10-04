@@ -31,11 +31,10 @@ class SpaceRenderer(private val density: Float, typeface: Typeface) {
     var insetBottom = 24f * density
 
     private val tmp = FloatArray(3)
-    private val tmpB = FloatArray(3)
-    private val pts = Array(Circuit.MAX_POINTS) { Vec3() }
-    private val cut = Array(Circuit.MAX_POINTS * 2) { Vec3() }
-    private val p0 = Vec3()
-    private val p1 = Vec3()
+    private val route = FloatArray(ScreenTrace.MAX_POINTS * 2)
+    private val at = FloatArray(2)
+    // Screen width of the frame being drawn; the trace's lengths and speed go by it.
+    private var viewWidth = 1f
     private val rect = RectF()
     private val order = ArrayList<SpaceBody>()
     private val farFirst = Comparator<SpaceBody> { a, b -> b.depth.compareTo(a.depth) }
@@ -58,6 +57,7 @@ class SpaceRenderer(private val density: Float, typeface: Typeface) {
     fun draw(canvas: Canvas, scene: SpaceScene, camera: SpaceCamera, width: Float, height: Float, time: Float) {
         canvas.drawColor(SpaceColors.BG)
         camera.beginFrame(width, height)
+        viewWidth = width
 
         for (body in scene.bodies) {
             if (body is SpaceHub && body.widthEm == 0f) body.widthEm = measurePaint.measureText(body.label) / 100f
@@ -65,10 +65,10 @@ class SpaceRenderer(private val density: Float, typeface: Typeface) {
         }
 
         scene.center?.let { center ->
-            for (hub in scene.hubs) drawCenterLink(canvas, scene, center, hub, camera, time)
+            for (hub in scene.hubs) drawCenterLink(canvas, scene, center, hub, time)
         }
         scene.focused?.let { hub ->
-            scene.members[hub]?.forEach { member -> drawMemberLink(canvas, scene, hub, member, camera, time) }
+            scene.members[hub]?.forEach { member -> drawMemberLink(canvas, scene, hub, member, time) }
         }
 
         order.clear()
@@ -148,15 +148,11 @@ class SpaceRenderer(private val density: Float, typeface: Typeface) {
             sx = cx + dx * t
             sy = cy + dy * t
         }
-        val rawX = sx
-        val rawY = sy
         sx = if (minX <= maxX) sx.coerceIn(minX, maxX) else cx
         sy = if (minY <= maxY) sy.coerceIn(minY, maxY) else cy
 
         body.screenX = sx
         body.screenY = sy
-        body.pushX = if (inFront) sx - rawX else 0f
-        body.pushY = if (inFront) sy - rawY else 0f
         body.depth = abs(d)
         body.visible = body.opacity > 0.01f && size > 1.5f
     }
@@ -203,28 +199,28 @@ class SpaceRenderer(private val density: Float, typeface: Typeface) {
     }
 
     /** The focus wired to each of its apps: the trace is the app's own line. */
-    private fun drawMemberLink(canvas: Canvas, scene: SpaceScene, hub: SpaceHub, member: MemberNode, camera: SpaceCamera, time: Float) {
+    private fun drawMemberLink(canvas: Canvas, scene: SpaceScene, hub: SpaceHub, member: MemberNode, time: Float) {
         val start = scene.linkStart(member.index) ?: return
         // As thick as the icon's stroke where the app is, so the icon reads as wired in.
         val lineWidth = maxOf(density, SpaceScene.ICON_EM * member.sizePx * LineIconProcessor.STROKE_SHARE)
         val lineAlpha = if (member.arrived) member.opacity else TRACE_ALPHA_GROWING
-        drawTrace(canvas, hub, member, start, member.color, lineAlpha, lineWidth, Circuit.hash01(hub.seed, member.index + 1f), camera, time)
+        drawTrace(canvas, hub, member, start, member.color, lineAlpha, lineWidth, Circuit.hash01(hub.seed, member.index + 1f), time)
     }
 
     /** The centre app wired to a group, in the group's colour. */
-    private fun drawCenterLink(canvas: Canvas, scene: SpaceScene, center: CenterNode, hub: SpaceHub, camera: SpaceCamera, time: Float) {
+    private fun drawCenterLink(canvas: Canvas, scene: SpaceScene, center: CenterNode, hub: SpaceHub, time: Float) {
         val start = scene.centerLinkStart(hub) ?: return
         if (!center.visible && !hub.visible) return
         val lineWidth = maxOf(density, SpaceScene.ICON_EM * center.sizePx * LineIconProcessor.STROKE_SHARE * 0.8f)
         val lineAlpha = minOf(center.opacity, maxOf(hub.opacity, 0.3f))
         // The current runs out from the centre to the group.
-        drawTrace(canvas, center, hub, start, hub.group.color, lineAlpha, lineWidth, Circuit.hash01(hub.seed, 0.5f), camera, time)
+        drawTrace(canvas, center, hub, start, hub.group.color, lineAlpha, lineWidth, Circuit.hash01(hub.seed, 0.5f), time)
     }
 
     /**
      * SatelliteLinks: the trace grows out of [a], then a streak keeps running
-     * down it. If either end was pushed in from the edge, the wire bends along
-     * its length to meet it there.
+     * down it. It is routed on the screen between the two anchors, so every leg
+     * is straight across or up and down and only the corners are cut at 45°.
      */
     private fun drawTrace(
         canvas: Canvas,
@@ -235,33 +231,20 @@ class SpaceRenderer(private val density: Float, typeface: Typeface) {
         lineAlpha: Float,
         lineWidth: Float,
         h: Float,
-        camera: SpaceCamera,
         time: Float,
     ) {
         val grow = ((time - start) / SpaceScene.GROW_TIME).coerceAtMost(1f)
         if (grow <= 0f || lineAlpha <= 0.01f) return
-        val n = Circuit.chamfer(cut, pts, Circuit.route(pts, a.pos, b.pos, h))
-        val length = Circuit.polylineLength(cut, n)
+        // The web's world unit, in px, for the streak's size and speed.
+        val unit = viewWidth * UNIT_SHARE
+        val n = ScreenTrace.route(route, a.screenX, a.screenY, b.screenX, b.screenY, h, viewWidth * CHAMFER_SHARE)
+        val length = ScreenTrace.length(route, n)
         if (length <= 0f) return
         val drawn = length * grow
-        warpAx = a.pushX
-        warpAy = a.pushY
-        warpBx = b.pushX
-        warpBy = b.pushY
-        traceLength = length
 
         tracePaint.strokeWidth = lineWidth
         tracePaint.color = withAlpha(color, lineAlpha)
-        var run = 0f
-        for (j in 0 until n - 1) {
-            if (run >= drawn) break
-            val len = cut[j].distanceTo(cut[j + 1])
-            p1.copy(cut[j + 1])
-            val end = minOf(run + len, drawn)
-            if (run + len > drawn) p1.lerp(cut[j], cut[j + 1], (drawn - run) / len)
-            segment(canvas, cut[j], run, p1, end, camera)
-            run += len
-        }
+        strokeRange(canvas, n, 0f, drawn)
 
         // The current: a near-white core with a halo of the line's colour,
         // fading out along its tail, and a bright spark at its head.
@@ -270,12 +253,12 @@ class SpaceRenderer(private val density: Float, typeface: Typeface) {
         val span: Float
         if (grow < 1f) {
             // The spark riding the growing tip.
-            from = maxOf(0f, drawn - TIP)
-            span = minOf(TIP, drawn)
+            from = maxOf(0f, drawn - TIP * unit)
+            span = minOf(TIP * unit, drawn)
         } else {
-            val trail = minOf(STREAK_LENGTH, length * 0.7f)
+            val trail = minOf(STREAK_LENGTH * unit, length * 0.7f)
             val total = length + trail
-            val t = (time * Circuit.STREAK_SPEED) / total + h
+            val t = (time * Circuit.STREAK_SPEED * unit) / total + h
             val head = (t % 1f) * total
             from = head - trail
             span = trail
@@ -283,75 +266,41 @@ class SpaceRenderer(private val density: Float, typeface: Typeface) {
         for (pass in 0..1) {
             val halo = pass == 0
             tracePaint.strokeWidth = lineWidth * if (halo) HALO_WIDTH else CORE_WIDTH
-            Circuit.pointAlong(p0, cut, n, from)
-            var at0 = from
             for (k in 1..Circuit.STREAK_STEPS) {
-                val at1 = from + span * k / Circuit.STREAK_STEPS
-                Circuit.pointAlong(p1, cut, n, at1)
                 val fade = lineAlpha * k / Circuit.STREAK_STEPS
                 tracePaint.color = if (halo) withAlpha(color, fade * HALO_ALPHA) else withAlpha(core, fade)
-                segment(canvas, p0, at0, p1, at1, camera)
-                p0.copy(p1)
-                at0 = at1
+                strokeRange(canvas, n, from + span * (k - 1) / Circuit.STREAK_STEPS, from + span * k / Circuit.STREAK_STEPS)
             }
         }
         // The head, while it is still on the wire.
-        if (from + span in 0f..length && projectWarped(p1, from + span, camera, tmp)) {
+        if (from + span in 0f..length) {
+            ScreenTrace.pointAlong(at, route, n, from + span)
             sparkPaint.color = withAlpha(color, lineAlpha * HALO_ALPHA)
-            canvas.drawCircle(tmp[0], tmp[1], lineWidth * HALO_WIDTH * 0.75f, sparkPaint)
+            canvas.drawCircle(at[0], at[1], lineWidth * HALO_WIDTH * 0.75f, sparkPaint)
             sparkPaint.color = withAlpha(0xFFFFFFFF.toInt(), lineAlpha)
-            canvas.drawCircle(tmp[0], tmp[1], lineWidth * CORE_WIDTH * 0.75f, sparkPaint)
+            canvas.drawCircle(at[0], at[1], lineWidth * CORE_WIDTH * 0.75f, sparkPaint)
         }
     }
 
-    /** A piece of the current trace; [atA] / [atB] = distance along it, for the bend. */
-    /**
-     * A piece of the current trace; [atA] / [atB] = distance along it, for the
-     * bend. A piece reaching behind the camera is cut where it crosses the near
-     * plane — projecting that end as-is would fling the line across the screen.
-     */
-    private fun segment(canvas: Canvas, a: Vec3, atA: Float, b: Vec3, atB: Float, camera: SpaceCamera) {
-        camera.toCamera(a, tmp)
-        val da = tmp[2]
-        camera.toCamera(b, tmpB)
-        val db = tmpB[2]
-        if (da < CLIP_NEAR && db < CLIP_NEAR) return
-        var pa = a
-        var pb = b
-        var sa = atA
-        var sb = atB
-        if (da < CLIP_NEAR || db < CLIP_NEAR) {
-            val t = (CLIP_NEAR - da) / (db - da)
-            clipPoint.lerp(a, b, t)
-            val at = atA + (atB - atA) * t
-            if (da < CLIP_NEAR) {
-                pa = clipPoint
-                sa = at
-            } else {
-                pb = clipPoint
-                sb = at
+    /** The part of the route between [from] and [to] (distances along it), following its corners. */
+    private fun strokeRange(canvas: Canvas, n: Int, from: Float, to: Float) {
+        var run = 0f
+        for (j in 0 until n - 1) {
+            val x0 = route[2 * j]
+            val y0 = route[2 * j + 1]
+            val x1 = route[2 * j + 2]
+            val y1 = route[2 * j + 3]
+            val len = sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0))
+            val s = maxOf(from, run)
+            val e = minOf(to, run + len)
+            if (e > s && len > 0f) {
+                val t0 = (s - run) / len
+                val t1 = (e - run) / len
+                canvas.drawLine(x0 + (x1 - x0) * t0, y0 + (y1 - y0) * t0, x0 + (x1 - x0) * t1, y0 + (y1 - y0) * t1, tracePaint)
             }
+            run += len
+            if (run >= to) break
         }
-        if (projectWarped(pa, sa, camera, tmp) && projectWarped(pb, sb, camera, tmpB)) {
-            canvas.drawLine(tmp[0], tmp[1], tmpB[0], tmpB[1], tracePaint)
-        }
-    }
-
-    private val clipPoint = Vec3()
-
-    // The current trace's end pushes, blended along its length.
-    private var warpAx = 0f
-    private var warpAy = 0f
-    private var warpBx = 0f
-    private var warpBy = 0f
-    private var traceLength = 1f
-
-    private fun projectWarped(p: Vec3, at: Float, camera: SpaceCamera, out: FloatArray): Boolean {
-        if (!camera.project(p, out)) return false
-        val f = (at / traceLength).coerceIn(0f, 1f)
-        out[0] += warpAx * (1f - f) + warpBx * f
-        out[1] += warpAy * (1f - f) + warpBy * f
-        return true
     }
 
     private fun withAlpha(color: Int, alpha: Float): Int =
@@ -368,10 +317,12 @@ class SpaceRenderer(private val density: Float, typeface: Typeface) {
     }
 
     private companion object {
+        // The streak's tip, length and speed are in "units"; one is this share of the screen's width.
+        const val UNIT_SHARE = 0.11f
+        // How far a trace's corners are cut, as a share of the screen's width.
+        const val CHAMFER_SHARE = 0.03f
         const val TIP = 0.5f
         const val NEAR = 0.3f
-        // Wires are cut this far in front of the camera.
-        const val CLIP_NEAR = 0.6f
         // A group name is never wider than this share of the screen.
         const val MAX_TITLE_SHARE = 0.45f
         // An icon is never wider than this share of the screen.

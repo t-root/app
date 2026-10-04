@@ -59,6 +59,9 @@ class SpaceCamera {
     var focal = 1000f
         private set
 
+    /** How far in front of the focus the camera settles. */
+    val focusDistance: Float get() = FOCUS_DISTANCE
+
     /** Only turns on its own while nothing is focused (web: idle mode). */
     var autoRotate = true
 

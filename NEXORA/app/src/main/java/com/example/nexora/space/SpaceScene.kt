@@ -48,9 +48,6 @@ abstract class SpaceBody(val key: String) {
     var depth = 0f
     var sizePx = 0f
     var visible = false
-    // How far it was pushed on screen to stay inside the view (traces follow).
-    var pushX = 0f
-    var pushY = 0f
     var hitLeft = 0f
     var hitTop = 0f
     var hitRight = 0f
@@ -68,6 +65,10 @@ class SpaceHub(val group: AppGroup, val home: Vec3, val phase: Float, val seed: 
     var memberCount = 0
         internal set
     var focused = false
+        internal set
+
+    /** What its apps' places are seeded from: chosen when it opens so they overlap least. */
+    var memberSeed = seed
         internal set
 
     val label get() = group.name
@@ -120,9 +121,11 @@ class SpaceScene(
     /** When the centre's traces to every group started growing (idle only). */
     private var idleLinksStart: Float? = null
 
-    /** Orbit angle of every ring (web: sceneState.orbitAngle). */
-    var orbitAngle = 0f
-        private set
+    /**
+     * Orbit angle of every ring (web: sceneState.orbitAngle). Fixed: the rings
+     * don't turn, so a group's apps are in the same places every time it opens.
+     */
+    private val orbitAngle = 0f
 
     private var ringFit = 1f
     private var ringIconScale = FloatArray(1) { 0.3f }
@@ -138,9 +141,38 @@ class SpaceScene(
         members[focused]?.forEach { it.arrived = false }
         focused = hub
         hub.focused = true
+        hub.memberSeed = pickMemberSeed(hub, camera)
         linksStart = null
         idleLinksStart = null
         camera.frameFocus()
+    }
+
+    /**
+     * The seed that puts this group's apps on their rings with the least
+     * overlap on screen, tried on the focus's final framing. The same group
+     * gets the same one each time.
+     */
+    private fun pickMemberSeed(hub: SpaceHub, camera: SpaceCamera): Float {
+        val count = members[hub]?.size ?: 0
+        if (count < 2) return hub.seed
+        val distance = camera.focusDistance
+        val halfW = camera.visibleWidthAt(distance) / 2f
+        val halfH = camera.visibleHeightAt(distance) / 2f
+        if (halfW < 0.5f) return hub.seed // not laid out yet
+        val boost = camera.aspect.coerceIn(1f, 2f)
+        val metrics = ringMetrics(count, halfW, halfH, boost)
+        var best = hub.seed
+        var bestScore = Float.MAX_VALUE
+        for (j in 0 until MEMBER_TRIES) {
+            val seed = hub.seed + j * 37.31f
+            val score = satelliteOverlap(count, seed, metrics, boost)
+            if (score < bestScore) {
+                best = seed
+                bestScore = score
+            }
+            if (score == 0f) break
+        }
+        return best
     }
 
     fun unfocus(camera: SpaceCamera) {
@@ -163,7 +195,6 @@ class SpaceScene(
     }
 
     fun update(time: Float, dt: Float, camera: SpaceCamera) {
-        orbitAngle += dt * 0.16f
         camera.position(camPos)
         camera.autoRotate = focused == null
         val focus = focused
@@ -190,27 +221,13 @@ class SpaceScene(
         // stretch up and down so they fill the height too.
         if (focus != null) {
             val count = members[focus]?.size ?: 0
-            val outer = if (count == 0) 1f else ringSpec(count).last().r
             val distance = camPos.distanceTo(FOCUS_CENTER)
-            val halfW = camera.visibleWidthAt(distance) / 2f
-            val halfH = camera.visibleHeightAt(distance) / 2f
-            ringFit = ((halfW * 0.85f - 0.6f) / outer).coerceIn(0.45f, 2.2f)
+            val metrics = ringMetrics(count, camera.visibleWidthAt(distance) / 2f, camera.visibleHeightAt(distance) / 2f, tiltBoost)
+            ringFit = metrics.fit
+            ringStretch = metrics.stretch
+            ringIconScale = metrics.iconScale
             // Never zoom in past the near side of the rings.
-            camera.contentRadius = outer * ringFit + CAMERA_MARGIN
-            val reach = outer * ringFit * sin(INNER_TILT * tiltBoost)
-            ringStretch = if (reach > 0f) (halfH * 0.72f / reach).coerceIn(1f, 3.5f) else 1f
-
-            // Icon size from the room each app gets on its ring: few apps, big
-            // icons; a crowded ring, smaller ones — the ring stays filled.
-            val rings = ringSpec(max(1, count))
-            val maxIcon = min(1.1f, halfW * 0.3f)
-            ringIconScale = FloatArray(rings.size) { k ->
-                val a = rings[k].r * ringFit
-                val tilt = (if (k % 2 == 0) INNER_TILT else OUTER_TILT) * tiltBoost
-                val b = a * abs(sin(tilt)) * ringStretch
-                val perApp = ellipsePerimeter(a, b) / rings[k].count
-                (perApp * 0.4f).coerceIn(0.4f, maxIcon) / ICON_EM
-            }
+            camera.contentRadius = metrics.outer * ringFit + CAMERA_MARGIN
         }
         // Idle, the group names spread up and down to the screen's shape.
         stretchY = (camera.aspect * 0.85f).coerceIn(0.7f, 2f)
@@ -283,7 +300,7 @@ class SpaceScene(
             return
         }
 
-        satellitePosition(node.target, node.index, node.count, orbitAngle, hub.pos, ringFit, tiltBoost, ringStretch)
+        satellitePosition(node.target, node.index, node.count, orbitAngle, hub.pos, ringFit, tiltBoost, ringStretch, hub.memberSeed)
         Motion.dampVec(node.pos, node.target, 4f, dt)
 
         // Sized by the room on its ring; the perspective is undone so every icon
@@ -404,9 +421,9 @@ class SpaceScene(
         /** An app icon is this many em wide (an em = the web's label size). */
         const val ICON_EM = 2.6f
         // How far outside the content the camera must stay.
-        private const val CAMERA_MARGIN = 1.6f
+        internal const val CAMERA_MARGIN = 1.6f
         // Group name size (em, world units): idle, and as the focus.
-        private const val GROUP_TITLE = 0.55f
+        internal const val GROUP_TITLE = 0.55f
         private const val FOCUS_TITLE = 0.6f
         const val GROW_TIME = 0.45f
         private const val CHILD_STAGGER = 0.06f
@@ -415,6 +432,8 @@ class SpaceScene(
         private const val SATELLITE_SPACING = 2.3f
         private const val RING_CAPACITY = 14
         private val GOLDEN_ANGLE = (PI * (3.0 - sqrt(5.0))).toFloat()
+        // Group names stay at least this far (share of their radius) above or below the centre's level.
+        internal const val MIN_LATITUDE = 0.3f
 
         // Where the web puts its focus: 6.2 in front of the framing camera.
         val FOCUS_CENTER = Vec3(0f, 0f, 4.8f)
@@ -429,7 +448,13 @@ class SpaceScene(
          * Builds the space. Bodies already in [previous] keep their position,
          * size and motion, and the focus carries over while its group exists.
          */
-        fun build(apps: List<AppNode>, groups: List<AppGroup>, centerPackage: String?, previous: SpaceScene?): SpaceScene {
+        fun build(
+            apps: List<AppNode>,
+            groups: List<AppGroup>,
+            centerPackage: String?,
+            previous: SpaceScene?,
+            layoutSalt: Int = Random.nextInt(),
+        ): SpaceScene {
             val byPackage = apps.associateBy { it.packageName }
             // The centre app is claimed first: never in a group, never floating.
             val centerApp = centerPackage?.let { byPackage[it] }
@@ -439,15 +464,14 @@ class SpaceScene(
             }
             val old = previous?.bodies?.associateBy { it.key } ?: emptyMap()
 
-            // Group names spread over a sphere round the centre app (golden-angle
-            // spiral, a little flattened), so its traces fan out every way.
+            // Group names spread over a sphere round the centre app so its traces
+            // fan out every way. The places are drawn anew every time the space is
+            // built (from [layoutSalt]): the best of many draws, the one where names
+            // overlap least seen from every side.
+            val hubHomes = HubLayout.pick(groups.map { HubLayout.widthEm(it.name) }, layoutSalt)
             val hubs = groups.mapIndexed { i, group ->
-                val r = 2.8f + groups.size * 0.12f
-                val y = if (groups.size == 1) 0.3f else 1f - ((i + 0.5f) / groups.size) * 2f
-                val ring = sqrt(max(0f, 1f - y * y))
-                val theta = i * GOLDEN_ANGLE
-                val home = Vec3(cos(theta) * ring * r, y * r, sin(theta) * ring * r)
-                val seed = (group.id.hashCode() and 0xFFFF).toFloat()
+                val seed = hubSeed(groups, i)
+                val home = hubHomes[i]
                 SpaceHub(group, home, (seed * 2.399f) % (2f * PI.toFloat()), seed % 97f)
             }
 
@@ -480,7 +504,6 @@ class SpaceScene(
             if (center != null) nodes += center
             val scene = SpaceScene(hubs, nodes, center)
             if (previous != null) {
-                scene.orbitAngle = previous.orbitAngle
                 val keep = previous.focused?.let { f -> hubs.firstOrNull { it.group.id == f.group.id } }
                 if (keep != null) {
                     scene.focused = keep
@@ -492,6 +515,51 @@ class SpaceScene(
                 }
             }
             return scene
+        }
+
+        /**
+         * The spot (0 until count) each group takes on the spiral: the order of
+         * their [seeds], so the spots are shuffled by name — which group is high,
+         * which low, doesn't follow the list's order. Equal seeds go by position.
+         */
+        internal fun hubSlots(seeds: List<Float>): List<Int> {
+            val order = seeds.indices.sortedWith(compareBy({ seeds[it] }, { it }))
+            val slots = IntArray(seeds.size)
+            order.forEachIndexed { rank, i -> slots[i] = rank }
+            return slots.toList()
+        }
+
+        /**
+         * Where the group on spot [index] of [count] rests: on a sphere round the
+         * centre (golden-angle spiral, so they spread every way), pushed about in
+         * angle, height and distance by its [seed] so they don't sit in a tidy
+         * pattern. Fixed: the same groups always land in the same places.
+         */
+        internal fun hubHome(index: Int, count: Int, seed: Float): Vec3 {
+            fun noise(k: Float) = Circuit.hash01(seed, k) - 0.5f // -0.5..0.5
+            val r = (2.8f + count * 0.12f) * (1f + noise(1f) * 0.6f)
+            val slice = 2f / count
+            // Up to ±0.7 of a height slice either way: neighbours in the spiral can swap heights.
+            val y = (if (count == 1) 0.3f else 1f - (index + 0.5f) * slice) + noise(2f) * slice * 1.4f
+            // Never on the equator: the camera turns round the centre app, and a name
+            // there would pass over it. The heights are squeezed out to either side.
+            val m = y.coerceIn(-1f, 1f)
+            val yc = (if (m < 0f) -1f else 1f) * (MIN_LATITUDE + (0.95f - MIN_LATITUDE) * abs(m))
+            val ring = sqrt(max(0f, 1f - yc * yc))
+            val theta = index * GOLDEN_ANGLE + noise(3f) * 1.4f
+            return Vec3(cos(theta) * ring * r, yc * r, sin(theta) * ring * r)
+        }
+
+        /**
+         * What a group's drift and wander are seeded from: its name, so the same
+         * groups always move the same way. (Not its id: that is random, made
+         * anew for every group created or imported.) Groups that share a name
+         * are told apart by their order.
+         */
+        internal fun hubSeed(groups: List<AppGroup>, index: Int): Float {
+            val name = groups[index].name
+            val sameBefore = (0 until index).count { groups[it].name == name }
+            return ("$name#$sameBefore".hashCode() and 0xFFFF).toFloat()
         }
 
         private fun carry(from: SpaceBody?, to: SpaceBody, spawnAt: Vec3) {
@@ -514,6 +582,64 @@ class SpaceScene(
         }
 
         private class Ring(val start: Int, val count: Int, val r: Float)
+
+        /** How a focused group's rings fit the screen: scale, vertical stretch, icon size per ring. */
+        internal class RingMetrics(val fit: Float, val stretch: Float, val iconScale: FloatArray, val outer: Float)
+
+        internal fun ringMetrics(count: Int, halfW: Float, halfH: Float, tiltBoost: Float): RingMetrics {
+            val outer = if (count == 0) 1f else ringSpec(count).last().r
+            // Rings grow / shrink to the screen's width at the focus's depth, and
+            // stretch up and down so they fill the height too.
+            val fit = ((halfW * 0.85f - 0.6f) / outer).coerceIn(0.45f, 2.2f)
+            val reach = outer * fit * sin(INNER_TILT * tiltBoost)
+            val stretch = if (reach > 0f) (halfH * 0.72f / reach).coerceIn(1f, 3.5f) else 1f
+
+            // Icon size from the room each app gets on its ring: few apps, big
+            // icons; a crowded ring, smaller ones — the ring stays filled.
+            val rings = ringSpec(max(1, count))
+            val maxIcon = min(1.1f, halfW * 0.3f)
+            val iconScale = FloatArray(rings.size) { k ->
+                val a = rings[k].r * fit
+                val tilt = (if (k % 2 == 0) INNER_TILT else OUTER_TILT) * tiltBoost
+                val b = a * abs(sin(tilt)) * stretch
+                val perApp = ellipsePerimeter(a, b) / rings[k].count
+                (perApp * 0.4f).coerceIn(0.4f, maxIcon) / ICON_EM
+            }
+            return RingMetrics(fit, stretch, iconScale, outer)
+        }
+
+        /**
+         * How much the icons of a group of [count] apps overlap each other (and
+         * the group's name in the middle) on screen, with [seed]; summed box areas.
+         */
+        internal fun satelliteOverlap(count: Int, seed: Float, metrics: RingMetrics, tiltBoost: Float): Float {
+            val x = FloatArray(count)
+            val y = FloatArray(count)
+            val half = FloatArray(count)
+            val p = Vec3()
+            for (i in 0 until count) {
+                satellitePosition(p, i, count, 0f, ORIGIN, metrics.fit, tiltBoost, metrics.stretch, seed)
+                x[i] = p.x
+                y[i] = p.y
+                half[i] = ICON_EM * metrics.iconScale[ringIndex(i, count).coerceAtMost(metrics.iconScale.size - 1)] / 2f
+            }
+            var total = 0f
+            for (i in 0 until count) {
+                for (j in i + 1 until count) {
+                    total += boxOverlap(half[i] + half[j] - abs(x[i] - x[j]), half[i] + half[j] - abs(y[i] - y[j]))
+                }
+                // The name of the group in the middle.
+                total += 2f * boxOverlap(half[i] + FOCUS_NAME_HALF_W - abs(x[i]), half[i] + FOCUS_NAME_HALF_H - abs(y[i]))
+            }
+            return total
+        }
+
+        private fun boxOverlap(overlapX: Float, overlapY: Float) = if (overlapX > 0f && overlapY > 0f) overlapX * overlapY else 0f
+
+        // The focused group's name, roughly, in world units: half its width and height.
+        private const val FOCUS_NAME_HALF_W = 1.0f
+        private const val FOCUS_NAME_HALF_H = 0.5f
+        private const val MEMBER_TRIES = 24
 
         private fun roomFor(n: Int) = (n * SATELLITE_SPACING) / (PI.toFloat() * 2)
 
@@ -544,7 +670,7 @@ class SpaceScene(
             return rings
         }
 
-        private fun satellitePosition(
+        internal fun satellitePosition(
             out: Vec3,
             index: Int,
             count: Int,
@@ -553,6 +679,7 @@ class SpaceScene(
             fit: Float,
             tiltBoost: Float,
             yStretch: Float,
+            seed: Float,
         ) {
             val rings = ringSpec(count)
             var k = rings.size - 1
@@ -563,10 +690,18 @@ class SpaceScene(
             val even = k % 2 == 0
             val tilt = (if (even) INNER_TILT else OUTER_TILT) * tiltBoost
             val stagger = if (k >= 2) (PI.toFloat() / ring.count) * (k / 2) else 0f
-            val a = (if (even) angle else -angle) + (i / ring.count.toFloat()) * PI.toFloat() * 2 + stagger
-            val x = cos(a) * r
-            val z = sin(a) * r
-            out.set(center.x + x, center.y - z * sin(tilt) * yStretch, center.z + z * cos(tilt))
+            // Not a tidy polygon (4 apps would make a plus sign): each ring starts at its
+            // own angle and each app sits a little off its spot, in angle, distance and
+            // height — all from the group's seed, so it is the same every time.
+            val step = (PI.toFloat() * 2) / ring.count
+            fun noise(k: Float) = Circuit.hash01(seed, index * 3.7f + k) - 0.5f // -0.5..0.5
+            val start = (Circuit.hash01(seed, 9.1f + k) * PI.toFloat() * 2) * (if (even) 1f else -1f)
+            val a = (if (even) angle else -angle) + start + i * step + stagger + noise(1f) * step * 0.45f
+            val rr = r * (1f + noise(2f) * 0.22f)
+            val x = cos(a) * rr
+            val z = sin(a) * rr
+            val lift = noise(3f) * 0.5f * fit
+            out.set(center.x + x, center.y - z * sin(tilt) * yStretch + lift, center.z + z * cos(tilt))
         }
 
         /** Round-robin over three shells, golden-angle spiral within each (positions.js). */
