@@ -1,10 +1,13 @@
 package com.example.nexora.service
 
 import android.accessibilityservice.AccessibilityService
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Rect
+import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityWindowInfo
@@ -94,8 +97,19 @@ class CoverAccessibilityService : AccessibilityService() {
         return packageManager.resolveActivity(home, PackageManager.MATCH_DEFAULT_ONLY)?.activityInfo?.packageName
     }
 
-    private companion object {
-        const val TAG = "NexoraAvoid"
-        const val SYSTEM_UI = "com.android.systemui"
+    companion object {
+        private const val TAG = "NexoraAvoid"
+        private const val SYSTEM_UI = "com.android.systemui"
+
+        /** Whether the service is switched on in Accessibility settings. */
+        fun isEnabled(context: Context): Boolean {
+            val enabled = Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+                ?: return false
+            val component = ComponentName(context, CoverAccessibilityService::class.java)
+            return enabled.split(':').any {
+                it.equals(component.flattenToString(), ignoreCase = true) ||
+                    it.equals(component.flattenToShortString(), ignoreCase = true)
+            }
+        }
     }
 }

@@ -47,6 +47,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.net.toUri
 import com.example.nexora.model.CoverSettings
+import com.example.nexora.service.CoverAccessibilityService
 import com.example.nexora.service.ScreenCover
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
@@ -66,9 +67,11 @@ fun CoverDialog(
 
     // Re-checked while open: the user may come back from the permission screen.
     var canDraw by remember { mutableStateOf(ScreenCover.canDraw(context)) }
+    var accessibilityOn by remember { mutableStateOf(CoverAccessibilityService.isEnabled(context)) }
     LaunchedEffect(Unit) {
         while (true) {
             canDraw = ScreenCover.canDraw(context)
+            accessibilityOn = CoverAccessibilityService.isEnabled(context)
             delay(1000)
         }
     }
@@ -124,26 +127,38 @@ fun CoverDialog(
                     )
 
                     if (!canDraw) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .border(1.dp, Color(0xFFFF5370))
-                                .padding(12.dp),
-                        ) {
-                            Text(
-                                "Cần quyền \"Hiển thị trên các ứng dụng khác\".",
-                                color = Color(0xFFFF5370),
-                                fontSize = 13.sp,
-                            )
-                            TextButton(onClick = {
-                                val intent = Intent(
-                                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                    "package:${context.packageName}".toUri(),
-                                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                context.startActivity(intent)
-                            }) { Text("Cấp quyền", color = TerminalGreen) }
-                        }
-                        Spacer(Modifier.height(8.dp))
+                        SetupNotice(
+                            text = "Cần quyền \"Hiển thị trên các ứng dụng khác\".",
+                            button = "Cấp quyền",
+                            onClick = {
+                                context.startActivity(
+                                    Intent(
+                                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                        "package:${context.packageName}".toUri(),
+                                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            },
+                        )
+                    }
+                    if (!accessibilityOn) {
+                        SetupNotice(
+                            text = "Nên bật dịch vụ trợ năng \"NEXORA\": nhờ nó khối che biết ứng dụng khác đang nổi ở đâu " +
+                                "để chừa chỗ, không che mất. Nó chỉ đọc vị trí và tên gói của các cửa sổ, không đọc nội dung nào. " +
+                                "Nếu máy báo \"Cài đặt bị hạn chế\", vào Thông tin ứng dụng → ⋮ → Cho phép cài đặt bị hạn chế.",
+                            button = "Mở cài đặt trợ năng",
+                            onClick = {
+                                context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                            },
+                            secondButton = "Thông tin ứng dụng",
+                            onSecondClick = {
+                                context.startActivity(
+                                    Intent(
+                                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                        "package:${context.packageName}".toUri(),
+                                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            },
+                        )
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -173,6 +188,32 @@ fun CoverDialog(
                     // Room to scroll the last row clear of the bottom edge.
                     Spacer(Modifier.height(48.dp))
                 }
+            }
+        }
+    }
+}
+
+/** A missing permission / setting: what it is for, and buttons that go to where it is switched on. */
+@Composable
+private fun SetupNotice(
+    text: String,
+    button: String,
+    onClick: () -> Unit,
+    secondButton: String? = null,
+    onSecondClick: () -> Unit = {},
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 8.dp)
+            .border(1.dp, Color(0xFFFF5370))
+            .padding(12.dp),
+    ) {
+        Text(text, color = Color(0xFFFF5370), fontSize = 13.sp)
+        Row {
+            TextButton(onClick = onClick) { Text(button, color = TerminalGreen) }
+            if (secondButton != null) {
+                TextButton(onClick = onSecondClick) { Text(secondButton, color = TerminalGreen) }
             }
         }
     }
