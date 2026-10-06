@@ -4,9 +4,11 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.util.Log
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import com.example.nexora.model.AppNode
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -32,22 +34,31 @@ class AppRepository(private val context: Context) {
             resolveInfoList.map { resolveInfo ->
                 async {
                     val packageName = resolveInfo.activityInfo.packageName
-                    val updated = try {
-                        packageManager.getPackageInfo(packageName, 0).lastUpdateTime
-                    } catch (_: Exception) {
-                        0L
+                    // One app that cannot be read (just installed or removed, say)
+                    // must not take the whole list down with it.
+                    try {
+                        val updated = try {
+                            packageManager.getPackageInfo(packageName, 0).lastUpdateTime
+                        } catch (_: Exception) {
+                            0L
+                        }
+                        val icon = lineIcon(packageName, updated) {
+                            LineIconProcessor.process(resolveInfo.loadIcon(packageManager))
+                        }
+                        AppNode(
+                            packageName = packageName,
+                            appName = resolveInfo.loadLabel(packageManager).toString(),
+                            iconBitmap = icon.bitmap.asImageBitmap(),
+                            tintColor = Color(icon.color),
+                        )
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.w("AppRepository", "Skipping $packageName", e)
+                        null
                     }
-                    val icon = lineIcon(packageName, updated) {
-                        LineIconProcessor.process(resolveInfo.loadIcon(packageManager))
-                    }
-                    AppNode(
-                        packageName = packageName,
-                        appName = resolveInfo.loadLabel(packageManager).toString(),
-                        iconBitmap = icon.bitmap.asImageBitmap(),
-                        tintColor = Color(icon.color),
-                    )
                 }
-            }.awaitAll()
+            }.awaitAll().filterNotNull()
         }
     }
 

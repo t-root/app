@@ -13,6 +13,7 @@ import com.example.nexora.R
 import com.example.nexora.data.AppRepository
 import com.example.nexora.data.GroupRepository
 import com.example.nexora.data.SettingsRepository
+import com.example.nexora.data.listenForPackageChanges
 import com.example.nexora.model.AppGroup
 import com.example.nexora.model.AppNode
 import com.example.nexora.space.SpaceCamera
@@ -22,6 +23,7 @@ import com.example.nexora.space.SpaceRenderer
 import com.example.nexora.space.SpaceScene
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -85,6 +87,8 @@ class KnowledgeGraphWallpaperService : WallpaperService() {
         private var surfaceHeight = 0f
         private var time = 0f
         private var lastTime = System.currentTimeMillis()
+        private var loadJob: Job? = null
+        private var stopListening: (() -> Unit)? = null
 
         private var touchDownTime = 0L
         private var touchDownX = 0f
@@ -123,11 +127,20 @@ class KnowledgeGraphWallpaperService : WallpaperService() {
             if (!isPreview) ScreenCover.content = coverContent
             groups = groupRepository.load()
             centerPackage = settings.centerPackage
-            serviceScope.launch {
+            loadApps()
+            // An app installed or uninstalled meanwhile shows at once.
+            stopListening = listenForPackageChanges(applicationContext, ::loadApps)
+        }
+
+        private fun loadApps() {
+            loadJob?.cancel()
+            loadJob = serviceScope.launch {
                 val loaded = appRepository.getInstalledApps()
                 handler.post {
+                    // Only a changed set of apps redraws the layout.
+                    val changed = scene == null || loaded.map { it.packageName }.toSet() != apps.map { it.packageName }.toSet()
                     apps = loaded
-                    rebuildScene()
+                    if (changed) rebuildScene()
                 }
             }
         }
@@ -149,6 +162,8 @@ class KnowledgeGraphWallpaperService : WallpaperService() {
                 groups = groupRepository.load()
                 centerPackage = settings.centerPackage
                 rebuildScene()
+                // Safety net in case an install / uninstall broadcast was missed.
+                loadApps()
                 lastTime = System.currentTimeMillis()
                 handler.post(drawRunnable)
             }
@@ -194,6 +209,7 @@ class KnowledgeGraphWallpaperService : WallpaperService() {
             if (ScreenCover.content === coverContent) ScreenCover.content = null
             handler.removeCallbacks(longPress)
             handler.removeCallbacks(drawRunnable)
+            stopListening?.invoke()
             serviceScope.cancel()
         }
 

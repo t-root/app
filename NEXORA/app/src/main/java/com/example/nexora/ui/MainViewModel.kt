@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.nexora.data.AppRepository
 import com.example.nexora.data.GroupConfig
 import com.example.nexora.data.GroupRepository
+import com.example.nexora.data.listenForPackageChanges
 import com.example.nexora.data.SettingsRepository
 import com.example.nexora.model.AppGroup
 import com.example.nexora.model.AppNode
@@ -46,6 +47,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val cover: StateFlow<CoverSettings> = _cover.asStateFlow()
 
     private var loadJob: Job? = null
+
+    // An app installed or uninstalled while this screen is up shows at once.
+    private val stopListening = listenForPackageChanges(application, ::refreshApps)
+
+    override fun onCleared() {
+        stopListening()
+    }
 
     init {
         // Groups coloured from the old, too-similar palette get distinct colours
@@ -88,7 +96,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Reloads installed apps; only the first load shows the spinner. */
     fun refreshApps() {
-        if (loadJob?.isActive == true) return
+        // A load already running may have read the list before the change.
+        loadJob?.cancel()
         loadJob = viewModelScope.launch {
             _isLoading.value = _apps.value.isEmpty()
             _apps.value = repository.getInstalledApps()

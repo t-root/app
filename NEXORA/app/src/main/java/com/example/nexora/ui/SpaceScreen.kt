@@ -211,6 +211,7 @@ fun SpaceScreen(
         if (showManager) {
             GroupManagerDialog(
                 groups = groups,
+                installed = apps.mapTo(HashSet()) { it.packageName },
                 centerApp = apps.firstOrNull { it.packageName == centerPackage },
                 onPickCenter = { pickingCenter = true },
                 showAppNames = showAppNames,

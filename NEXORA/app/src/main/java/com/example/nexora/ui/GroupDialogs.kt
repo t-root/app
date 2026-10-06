@@ -64,6 +64,7 @@ private val Accent = TerminalGreen
 @Composable
 fun GroupManagerDialog(
     groups: List<AppGroup>,
+    installed: Set<String>,
     centerApp: AppNode?,
     onPickCenter: () -> Unit,
     showAppNames: Boolean,
@@ -102,7 +103,7 @@ fun GroupManagerDialog(
                         ColorDot(Color(group.color), 14.dp)
                         Spacer(Modifier.width(12.dp))
                         Text(group.name, color = Color.White, modifier = Modifier.weight(1f))
-                        Text("${group.packages.size} ứng dụng", color = Color.White.copy(alpha = 0.5f), fontSize = 12.sp)
+                        Text("${group.packages.count { it in installed }} ứng dụng", color = Color.White.copy(alpha = 0.5f), fontSize = 12.sp)
                     }
                 }
 
